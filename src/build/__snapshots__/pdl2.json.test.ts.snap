@@ -1,0 +1,27 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`pdl2json is sane 1`] = `
+Object {
+  "domains": Array [
+    Object {
+      "domain": "Foo",
+      "types": Array [
+        Object {
+          "id": "Bar",
+          "properties": Array [
+            Object {
+              "name": "baz",
+              "type": "integer",
+            },
+          ],
+          "type": "object",
+        },
+      ],
+    },
+  ],
+  "version": Object {
+    "major": "1",
+    "minor": "3",
+  },
+}
+`;
