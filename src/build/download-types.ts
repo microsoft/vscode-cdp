@@ -10,15 +10,15 @@ import { pdlToTypeScript } from './pdlToTypeScript';
 
 const sources = new Map([
 	[
-		'V8',
+		'CdpV8',
 		'https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/pdl/js_protocol.pdl',
 	],
 	[
-		'Browser',
+		'CdpBrowser',
 		'https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/pdl/browser_protocol.pdl',
 	],
 	[
-		'Node',
+		'CdpNode',
 		'https://raw.githubusercontent.com/nodejs/node/master/src/inspector/node_protocol.pdl',
 	],
 ]);
@@ -26,11 +26,13 @@ const sources = new Map([
 const target = path.resolve(__dirname, '../../src/definitions.ts');
 
 async function main() {
-	const definitions = await Promise.all(
-		[...sources].map(async ([name, url]) => {
-			const json = await pdlUrlToJson(url);
-			return pdlToTypeScript(name, json);
-		}),
+	const definitions = pdlToTypeScript(
+		await Promise.all(
+			[...sources].map(async ([name, url]) => ({
+				name,
+				definition: await pdlUrlToJson(url),
+			})),
+		),
 	);
 
 	const src = await formatTs(`/*---------------------------------------------------------
@@ -39,7 +41,7 @@ async function main() {
 
 /* eslint-disable */
 
-${definitions.join('\n\n')}`);
+${definitions}`);
 
 	await fs.writeFile(target, src);
 }

@@ -4,14 +4,35 @@
 
 import * as PDL from './pdl-types';
 
+export interface IDefinitionRequest {
+	name: string;
+	definition: PDL.Definition;
+}
+
+export const pdlToTypeScript = (definitions: IDefinitionRequest[] = []) =>
+	definitions.map((_, i) => domainToTypeScript(i, definitions)).join('\n\n');
+
+const primitiveTypes = new Map([
+	['string', 'string'],
+	['number', 'number'],
+	['boolean', 'boolean'],
+	['object', 'Record<string, unknown>'],
+	['integer', 'integer'],
+	['any', 'any'],
+]);
+
 const toTitleCase = (s: string) => s[0].toUpperCase() + s.substr(1);
 
-export const pdlToTypeScript = (name: string, { domains }: PDL.Definition) => {
+const domainToTypeScript = (index: number, definitions: IDefinitionRequest[] = []) => {
 	const result = [];
 	const interfaceSeparator = createSeparator();
+	const {
+		name,
+		definition: { domains },
+	} = definitions[index];
 
 	result.push(``);
-	result.push(`export namespace Cdp${name} {`);
+	result.push(`export namespace ${name} {`);
 	result.push(`export type integer = number;`);
 	interfaceSeparator();
 
@@ -42,29 +63,51 @@ export const pdlToTypeScript = (name: string, { domains }: PDL.Definition) => {
 		};
 	}
 
-	function generateType(prop: PDL.DataType<boolean>): string {
+	const makeTypePredicate = (domainName: string, typeName: string) => (domain: PDL.Domain) => {
+		return domain.domain === domainName && domain.types?.some(t => t.id === typeName);
+	};
+
+	function generateType(domain: PDL.Domain, prop: PDL.DataType<boolean>): string {
 		if (prop.type === 'string' && prop.enum) {
 			return `${prop.enum.map(value => `'${value}'`).join(' | ')}`;
 		}
+
 		if ('$ref' in prop) {
-			return prop.$ref;
+			let [domainName, typeName] = prop.$ref.split('.');
+			if (!typeName) {
+				[domainName, typeName] = [domain.domain, domainName];
+			}
+
+			const hasType = makeTypePredicate(domainName, typeName);
+			const containing = definitions.find(d => d.definition.domains.some(hasType));
+			if (!containing) {
+				throw new Error(`${prop.$ref} is not contained in any domain`);
+			}
+
+			return containing === definitions[index]
+				? prop.$ref
+				: `${containing.name}.${prop.$ref}`;
 		}
+
 		if (prop.type === 'array') {
-			const subtype = prop.items ? generateType(prop.items) : 'any';
+			const subtype = prop.items ? generateType(domain, prop.items) : 'any';
 			return `${subtype}[]`;
 		}
-		if (prop.type === 'object') {
-			return 'any';
+
+		const primitiveType = primitiveTypes.get(prop.type);
+		if (primitiveType) {
+			return primitiveType;
 		}
-		return prop.type;
+
+		throw new Error(`Unknown type: ${JSON.stringify(prop)}`);
 	}
 
-	function appendProps(props: Iterable<PDL.DataType<false>>) {
+	function appendProps(domain: PDL.Domain, props: Iterable<PDL.DataType<false>>) {
 		const separator = createSeparator();
 		for (const prop of props) {
 			separator();
 			appendText(prop.description ?? '', { deprecated: !!prop.deprecated });
-			result.push(`${prop.name}${prop.optional ? '?' : ''}: ${generateType(prop)};`);
+			result.push(`${prop.name}${prop.optional ? '?' : ''}: ${generateType(domain, prop)};`);
 		}
 	}
 
@@ -107,19 +150,19 @@ export const pdlToTypeScript = (name: string, { domains }: PDL.Definition) => {
 			typesSeparator();
 			appendText(`Parameters of the '${name}.${command.name}' method.`);
 			result.push(`export interface ${toTitleCase(command.name)}Params {`);
-			appendProps(command.parameters || []);
+			appendProps(domain, command.parameters || []);
 			result.push(`}`);
 			typesSeparator();
 			appendText(`Return value of the '${name}.${command.name}' method.`);
 			result.push(`export interface ${toTitleCase(command.name)}Result {`);
-			appendProps(command.returns || []);
+			appendProps(domain, command.returns || []);
 			result.push(`}`);
 		}
 		for (const event of events) {
 			typesSeparator();
 			appendText(`Parameters of the '${name}.${event.name}' event.`);
 			result.push(`export interface ${toTitleCase(event.name)}Event {`);
-			appendProps(event.parameters || []);
+			appendProps(domain, event.parameters || []);
 			result.push(`}`);
 		}
 		for (const type of types) {
@@ -127,11 +170,11 @@ export const pdlToTypeScript = (name: string, { domains }: PDL.Definition) => {
 			appendText(type.description ?? '', { deprecated: !!type.deprecated });
 			if (type.type === 'object') {
 				result.push(`export interface ${toTitleCase(type.id)} {`);
-				if (type.properties) appendProps(type.properties);
+				if (type.properties) appendProps(domain, type.properties);
 				else result.push(`[key: string]: any;`);
 				result.push(`}`);
 			} else {
-				result.push(`export type ${toTitleCase(type.id)} = ${generateType(type)};`);
+				result.push(`export type ${toTitleCase(type.id)} = ${generateType(domain, type)};`);
 			}
 		}
 		result.push(`}`);
