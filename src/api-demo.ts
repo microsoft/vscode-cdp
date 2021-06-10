@@ -47,9 +47,14 @@ interface Event<TParams> {
 }
 
 type MapDomainStyle2<TDomain extends Domain> = {
-	[TKey in keyof TDomain['requests']]: (
-		arg: TDomain['requests'][TKey]['params'],
-	) => Promise<TDomain['requests'][TKey]['result']>;
+	[TKey in keyof TDomain['requests']]: Record<
+		string,
+		never
+	> extends TDomain['requests'][TKey]['params']
+		? () => Promise<TDomain['requests'][TKey]['result']>
+		: (
+				arg: TDomain['requests'][TKey]['params'],
+		  ) => Promise<TDomain['requests'][TKey]['result']>;
 } &
 	{
 		[TKey in keyof TDomain['events'] as `on${Capitalize<string & TKey>}`]: Event<
@@ -58,5 +63,5 @@ type MapDomainStyle2<TDomain extends Domain> = {
 	};
 
 const b: DomainsApiStyle2 = null!;
-b.Console.enable({ someClearMessage2Arg: 1 });
+b.Console.enable();
 b.Debugger.onPaused(p => p.callFrames).dispose();
