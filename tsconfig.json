@@ -1,18 +1,19 @@
 {
-  "compilerOptions": {
-    "module": "CommonJS",
-    "strict": true,
-    "noImplicitAny": true,
-    "noImplicitThis": true,
-    "noUnusedLocals": true,
-    "alwaysStrict": true,
-    "moduleResolution": "node",
-    "target": "ES2020",
-    "lib": ["ES2020"],
-    "outDir": "./dist",
-    "baseUrl": "./",
-    "skipLibCheck": true,
-    "types": ["node", "jest"]
-  },
-  "include": ["src"]
+	"compilerOptions": {
+		"module": "CommonJS",
+		"strict": true,
+		"noImplicitAny": true,
+		"noImplicitThis": true,
+		"noUnusedLocals": true,
+		"alwaysStrict": true,
+		"moduleResolution": "node",
+		"target": "ES2020",
+		"lib": ["ES2020"],
+		"outDir": "./dist",
+		"baseUrl": "./",
+		"skipLibCheck": true,
+		"types": ["node", "jest"],
+		"sourceMap": true
+	},
+	"include": ["src"]
 }

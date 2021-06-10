@@ -61,6 +61,7 @@
     "singleQuote": true,
     "arrowParens": "avoid",
     "printWidth": 100,
-    "tabWidth": 2
+    "useTabs": true,
+    "tabWidth": 4
   }
 }
