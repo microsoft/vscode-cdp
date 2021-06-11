@@ -21,7 +21,7 @@ export interface ITransport extends IDisposable {
 	/**
 	 * Sends a serialized message over the transport.
 	 */
-	send(message: string): void;
+	send(message: Transportable): void;
 }
 
 export * from './websocket';

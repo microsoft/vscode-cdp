@@ -2,14 +2,23 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import { ProtocolError } from './errors';
-import { ITransport } from './transport';
+import { EventEmitter, IDisposable } from 'cockatiel';
+import { CdpProtocol } from './cdp-protocol';
+import {
+	ConnectionClosedError,
+	DeserializationError,
+	MessageProcessingError,
+	ProtocolError,
+	UnknownSessionError,
+} from './errors';
+import { ISerializer } from './serializer';
+import { ITransport, Transportable } from './transport';
 
 interface IProtocolCallback {
-  resolve: (o: unknown) => void;
-  reject: (e: Error) => void;
-  from?: ProtocolError;
-  method: string;
+	resolve: (o: Record<string, unknown>) => void;
+	reject: (e: Error) => void;
+	stack?: string;
+	method: string;
 }
 
 let shouldCaptureStackTrace = false;
@@ -19,353 +28,286 @@ let shouldCaptureStackTrace = false;
  * This is useful for debugging, but has a performance overhead.
  */
 export function captureCdpStackTraces() {
-  shouldCaptureStackTrace = true;
+	shouldCaptureStackTrace = true;
 }
 
-let connectionId = 0;
+export class Connection {
+	private readonly sessions = new Map<string, CDPSession>();
+	private lastId = 1000;
+	private _closed = false;
+	private readonly closeEmitter = new EventEmitter<Error | undefined>();
+	private readonly willSendEmitter = new EventEmitter<CdpProtocol.ICommand>();
+	private readonly didReceiveEmitter = new EventEmitter<CdpProtocol.Message>();
+	private readonly receiveErrorEmitter = new EventEmitter<Error>();
 
-export default class Connection {
-  private _connectionId = connectionId++;
-  private _lastId = 1000;
-  private _transport: ITransport;
-  private _sessions: Map<string, CDPSession>;
-  private _disposedSessions = new Map<string, Date>();
-  private _closed: boolean;
-  private _rootSession: CDPSession;
-  private _onDisconnectedEmitter = new EventEmitter<void>();
-  readonly onDisconnected = this._onDisconnectedEmitter.event;
+	/**
+	 * @returns true if the underlying transport is closed
+	 */
+	public get closed() {
+		return this._closed;
+	}
 
-  constructor(
-    transport: ITransport,
-    private readonly logger: ILogger,
-    private readonly telemetryReporter: ITelemetryReporter,
-  ) {
-    this._transport = transport;
-    this._transport.onMessage(([message, time]) => this._onMessage(message, time));
-    this._transport.onEnd(() => this._onTransportClose());
-    this._sessions = new Map();
-    this._closed = false;
-    this._rootSession = new CDPSession(this, '', this.logger);
-    this._sessions.set('', this._rootSession);
-  }
+	/**
+	 * Event that fires before anything is sent on the Connection.
+	 */
+	public readonly onWillSendMessage = this.willSendEmitter.addListener;
 
-  rootSession(): Cdp.Api {
-    return this._rootSession.cdp();
-  }
+	/**
+	 * Event that fires after a message is received on the connection.
+	 */
+	public readonly onDidReceiveMessage = this.willSendEmitter.addListener;
 
-  public _send(method: string, params: object | undefined = {}, sessionId: string): number {
-    const id = ++this._lastId;
-    const message: CdpProtocol.ICommand = { id, method, params };
-    if (sessionId) message.sessionId = sessionId;
-    const messageString = JSON.stringify(message);
-    this.logger.verbose(LogTag.CdpSend, undefined, { connectionId: this._connectionId, message });
-    this._transport.send(messageString);
-    return id;
-  }
+	/**
+	 * Event that fires whenever an error is encountered processing received input.
+	 */
+	public readonly onDidReceiveError = this.receiveErrorEmitter.addListener;
 
-  private _onMessage(message: string, receivedTime: HrTime) {
-    const object = JSON.parse(message);
-    let objectToLog = object;
+	/**
+	 * Event that fires when the transport is disconnected, or when the
+	 * connection is manually disposed of. If it was the result of a transport
+	 * error, the error is included.
+	 */
+	public readonly onDidClose = this.closeEmitter.addListener;
 
-    // Don't print source code of getScriptSource responses
-    if (object.result && object.result.scriptSource) {
-      objectToLog = { ...object, result: { ...object.result, scriptSource: '<script source>' } };
-    } else if (
-      object.method === 'Debugger.scriptParsed' &&
-      object.params &&
-      object.params.sourceMapURL &&
-      object.params.sourceMapURL.startsWith('data:')
-    ) {
-      objectToLog = {
-        ...object,
-        params: { ...object.params, sourceMapURL: '<data source map url>' },
-      };
-    }
+	/**
+	 * Root CDP session.
+	 */
+	public readonly rootSession = new CDPSession(this, undefined);
 
-    this.logger.verbose(LogTag.CdpReceive, undefined, {
-      connectionId: this._connectionId,
-      message: objectToLog,
-    });
+	constructor(private readonly transport: ITransport, private readonly serializer: ISerializer) {
+		transport.onMessage(message => this._onMessage(message));
+		transport.onEnd(err => this.onTransportClose(err));
+	}
 
-    const session = this._sessions.get(object.sessionId || '');
-    if (!session) {
-      const disposedDate = this._disposedSessions.get(object.sessionId);
-      if (!disposedDate) {
-        throw new Error(
-          `Unknown session id: ${object.sessionId} while processing: ${object.method}`,
-        );
-      } else {
-        const secondsAgo = (Date.now() - disposedDate.getTime()) / 1000.0;
-        this.logger.warn(
-          LogTag.Internal,
-          `Got message for a session disposed ${secondsAgo} seconds ago`,
-          { sessionId: object.sessionId, disposeOn: disposedDate },
-        );
-        return; // We just ignore messages for disposed sessions
-      }
-    }
+	/**
+	 * Primitive send message. You should usually use the `send` method on
+	 * the {@link CDPSession} instance instead.
+	 */
+	public send(
+		method: string,
+		params: Record<string, unknown> | undefined = {},
+		sessionId: string | undefined,
+	): number {
+		const id = ++this.lastId;
+		const message: CdpProtocol.ICommand = { id, method, params, sessionId };
+		this.transport.send(this.serializer.serialize(message));
+		return id;
+	}
 
-    const eventName = object.method;
-    let error: Error | undefined;
-    try {
-      session._onMessage(object);
-    } catch (e) {
-      error = e;
-    }
+	private _onMessage(message: Transportable) {
+		let object: CdpProtocol.Message;
+		try {
+			object = this.serializer.deserialize(message);
+		} catch (e) {
+			this.receiveErrorEmitter.emit(new DeserializationError(e, message));
+			return;
+		}
 
-    // if eventName is undefined is because this is a response to a cdp request, so we don't report it
-    if (eventName) {
-      this.telemetryReporter.reportOperation(
-        'cdpOperation',
-        eventName,
-        receivedTime.elapsed().ms,
-        error,
-      );
-    }
-  }
+		this.didReceiveEmitter.emit(object);
 
-  private _onTransportClose() {
-    if (this._closed) return;
-    this._closed = true;
-    this._transport.dispose();
-    for (const session of this._sessions.values()) session._onClose();
-    this._sessions.clear();
-    this._onDisconnectedEmitter.fire();
-  }
+		const session = object.sessionId ? this.sessions.get(object.sessionId) : this.rootSession;
+		if (!session) {
+			this.receiveErrorEmitter.emit(new UnknownSessionError(object));
+			return;
+		}
 
-  public close() {
-    this._onTransportClose();
-  }
+		try {
+			session._onMessage(object);
+		} catch (e) {
+			this.receiveErrorEmitter.emit(new MessageProcessingError(e, object));
+			return;
+		}
+	}
 
-  public isClosed(): boolean {
-    return this._closed;
-  }
+	/**
+	 * Closes the connection and transport.
+	 */
+	public dispose() {
+		this.onTransportClose();
+	}
 
-  public createSession(sessionId: Cdp.Target.SessionID): Cdp.Api {
-    const session = new CDPSession(this, sessionId, this.logger);
-    this._sessions.set(sessionId, session);
-    return session.cdp();
-  }
+	/**
+	 * Creates a new Session with the given ID.
+	 */
+	public createSession(sessionId: string) {
+		const existing = this.sessions.get(sessionId);
+		if (existing) {
+			return existing;
+		}
 
-  public disposeSession(sessionId: Cdp.Target.SessionID) {
-    const session = this._sessions.get(sessionId);
-    if (!session) return;
-    session._onClose();
-    this._disposedSessions.set(session.sessionId(), new Date());
-    this._sessions.delete(session.sessionId());
-  }
+		const session = new CDPSession(this, sessionId);
+		this.sessions.set(sessionId, session);
+		session.onDidClose(() => this.sessions.delete(sessionId));
+		return session;
+	}
+
+	private onTransportClose(error?: Error) {
+		if (this.closed) {
+			return;
+		}
+
+		this._closed = true;
+		this.transport.dispose();
+		for (const session of this.sessions.values()) {
+			session.dispose();
+		}
+		this.closeEmitter.emit(error);
+	}
 }
 
-export class CDPSession {
-  private _connection?: Connection;
-  private _callbacks: Map<number, IProtocolCallback>;
-  private _sessionId: string;
-  private _cdp: Cdp.Api;
-  private _queue: CdpProtocol.Message[] = [];
-  private _prefixListeners = new ListenerMap<string, CdpProtocol.ICommand>();
-  private _directListeners = new ListenerMap<string, object>();
-  private paused = false;
+const enum ConnectionState {
+	Open,
+	Closed,
+}
 
-  constructor(connection: Connection, sessionId: string, private readonly logger: ILogger) {
-    this._callbacks = new Map();
-    this._connection = connection;
-    this._sessionId = sessionId;
-    this._cdp = this._createApi();
-  }
+export class CDPSession implements IDisposable {
+	private readonly callbacks = new Map<number, IProtocolCallback>();
+	private readonly eventEmitter = new EventEmitter<CdpProtocol.ICommand>();
+	private readonly closeEmitter = new EventEmitter<Error | undefined>();
+	private connection:
+		| { state: ConnectionState.Open; object: Connection }
+		| { state: ConnectionState.Closed; cause: Error | undefined };
+	private pauseQueue?: CdpProtocol.Message[];
+	private readonly disposables: IDisposable[] = [];
 
-  public pause() {
-    this.paused = true;
-  }
+	/**
+	 * Emitter that fires whenever an event is received. Method replies
+	 * are not emitted here.
+	 */
+	public readonly onDidReceiveEvent = this.eventEmitter.addListener;
 
-  public resume() {
-    if (!this.paused) {
-      return;
-    }
+	/**
+	 * Event that fires when the transport is disconnected, or when the
+	 * session is manually disposed of. If it was the result of a transport
+	 * error, the error is included.
+	 */
+	public readonly onDidClose = this.closeEmitter.addListener;
 
-    this.paused = false;
-    const toSend = this._queue;
-    this._queue = [];
-    this.logger.verbose(LogTag.CdpReceive, 'Dequeue messages', { message: toSend });
-    for (const item of toSend) {
-      this._processResponse(item);
-    }
-  }
+	/**
+	 * @returns true if the session or underlying connection is closed
+	 */
+	public get closed() {
+		return this.connection.state === ConnectionState.Closed;
+	}
 
-  cdp(): Cdp.Api {
-    return this._cdp;
-  }
+	constructor(connection: Connection, public readonly sessionId: string | undefined) {
+		this.connection = { state: ConnectionState.Open, object: connection };
+		this.disposables.push(connection.onDidClose(cause => this.disposeInner(cause)));
+	}
 
-  sessionId(): Cdp.Target.SessionID {
-    return this._sessionId;
-  }
+	/**
+	 * Pauses the processing of messages for the connection.
+	 */
+	public pause() {
+		this.pauseQueue ??= [];
+	}
 
-  _createApi(): Cdp.Api {
-    return new Proxy(
-      {},
-      {
-        get: (_target, agentName: string) => {
-          if (agentName === 'pause') return () => this.pause();
-          if (agentName === 'resume') return () => this.resume();
-          if (agentName === 'session') return this;
+	/**
+	 * Resumes the processing of messages for the connection.
+	 */
+	public resume() {
+		if (!this.pauseQueue) {
+			return;
+		}
 
-          return new Proxy(
-            {},
-            {
-              get: (_target, methodName: string) => {
-                if (methodName === 'then') return;
-                if (methodName === 'on')
-                  return (eventName: string, listener: (params: object) => void) =>
-                    this.on(`${agentName}.${eventName}`, listener);
-                return (params: object | undefined) =>
-                  this.send(`${agentName}.${methodName}`, params);
-              },
-            },
-          );
-        },
-      },
-    ) as Cdp.Api;
-  }
+		const toSend = this.pauseQueue;
+		this.pauseQueue = [];
+		for (const item of toSend) {
+			this.processResponse(item);
+		}
+	}
 
-  /**
-   * Adds a new listener for the given method.
-   */
-  public on(method: string, listener: (params: object) => void): IDisposable {
-    return this._directListeners.listen(method, listener);
-  }
+	/**
+	 * Sends a request to CDP, returning its untyped result.
+	 */
+	public send(method: string, params: Record<string, unknown> = {}) {
+		if (this.connection.state === ConnectionState.Closed) {
+			return Promise.reject(new ConnectionClosedError(this.connection.cause));
+		}
 
-  /**
-   * Adds a new listener for the given prefix.
-   */
-  public onPrefix(method: string, listener: (params: CdpProtocol.ICommand) => void): IDisposable {
-    return this._prefixListeners.listen(method, listener);
-  }
+		const id = this.connection.object.send(method, params, this.sessionId);
+		return new Promise<Record<string, unknown>>((resolve, reject) => {
+			const obj: IProtocolCallback = {
+				resolve,
+				reject,
+				method,
+			};
 
-  /**
-   * Sends a request to CDP, returning its untyped result.
-   */
-  public send(method: string, params: object | undefined = {}): Promise<object | undefined> {
-    return this.sendOrDie(method, params).catch(() => undefined);
-  }
+			if (shouldCaptureStackTrace) {
+				Error.captureStackTrace(obj);
+			}
 
-  /**
-   * Sends a request to CDP, returning a standard Promise
-   * with its resulting state.
-   */
-  public sendOrDie(method: string, params: object | undefined = {}): Promise<object> {
-    if (!this._connection) {
-      return Promise.reject(new ProtocolError(method).setCause(0, 'Connection is closed'));
-    }
+			this.callbacks.set(id, obj);
+		});
+	}
 
-    const id = this._connection._send(method, params, this._sessionId);
-    return new Promise<object>((resolve, reject) => {
-      this._callbacks.set(id, {
-        resolve,
-        reject,
-        from: new ProtocolError(method),
-        method,
-      });
-    });
-  }
+	/**
+	 * Handles an incoming message. Called by the connection.
+	 */
+	public _onMessage(object: CdpProtocol.Message) {
+		if (!this.pauseQueue || CdpProtocol.isResponse(object)) {
+			this.processResponse(object);
+		} else {
+			this.pauseQueue.push(object);
+		}
+	}
 
-  /**
-   * Handles an incoming message. Called by the connection.
-   */
-  public _onMessage(object: CdpProtocol.Message) {
-    // If we're paused, queue events but still process responses to avoid hanging.
-    if (this.paused && object.id) {
-      this._processResponse(object);
-      return;
-    }
+	/**
+	 * @inheritdoc
+	 */
+	public dispose() {
+		this.disposeInner(undefined);
+	}
 
-    // either replaying a paused queue, or needs reordering, if there's a queue
-    if (this._queue.length > 0) {
-      this._queue.push(object);
-      return;
-    }
+	private disposeInner(cause: Error | undefined) {
+		if (this.connection.state === ConnectionState.Closed) {
+			return;
+		}
 
-    // otherwise, if we don't need reordering and aren't paused, process it now
-    if (!needsReordering && !this.paused) {
-      this._processResponse(object);
-      return;
-    }
+		for (const callback of this.callbacks.values()) {
+			callback.reject(new ConnectionClosedError(cause, callback.stack));
+		}
 
-    // we know now that we have no existing queue but need to queue an item. Do so.
-    this._queue.push(object);
-    if (!this.paused) {
-      this._processQueue();
-    }
-  }
+		for (const disposable of this.disposables) {
+			disposable.dispose();
+		}
 
-  private _processQueue() {
-    this._connection?.waitWrapper(() => {
-      if (this.paused) {
-        return;
-      }
+		this.callbacks.clear();
+		this.connection = { state: ConnectionState.Closed, cause };
+		this.pauseQueue = undefined;
+		this.closeEmitter.emit(cause);
+	}
 
-      const object = this._queue.shift();
-      if (!object) {
-        return;
-      }
+	private processResponse(object: CdpProtocol.Message) {
+		if (object.id === undefined) {
+			// for some reason, TS doesn't narrow this even though CdpProtocol.ICommand
+			// is the only type of the tuple where id can be undefined.
+			this.eventEmitter.emit(object as CdpProtocol.ICommand);
+			return;
+		}
 
-      this._processResponse(object);
-      if (this._queue.length) {
-        this._processQueue();
-      }
-    });
-  }
+		const callback = this.callbacks.get(object.id);
+		if (!callback) {
+			return;
+		}
 
-  private _processResponse(object: CdpProtocol.Message) {
-    if (object.id === undefined) {
-      // for some reason, TS doesn't narrow this even though CdpProtocol.ICommand
-      // is the only type of the tuple where id can be undefined.
-      const asCommand = object as CdpProtocol.ICommand;
-      this._directListeners.emit(asCommand.method, asCommand.params);
-
-      // May eventually be useful to use a trie here if
-      // this becomes hot with many listeners
-      for (const [key, emitter] of this._prefixListeners.listeners) {
-        if (asCommand.method.startsWith(key)) {
-          emitter.fire(asCommand);
-        }
-      }
-
-      return;
-    }
-
-    const callback = this._callbacks.get(object.id);
-    if (!callback) {
-      return;
-    }
-
-    this._callbacks.delete(object.id);
-    if ('error' in object) {
-      callback.reject(callback.from.setCause(object.error.code, object.error.message));
-    } else if ('result' in object) {
-      callback.resolve(object.result);
-    }
-  }
-
-  public async detach() {
-    if (!this._connection) {
-      throw new Error(`Session already detached. Most likely the target has been closed.`);
-    }
-
-    this._connection._send('Target.detachFromTarget', {}, this._sessionId);
-  }
-
-  public isClosed(): boolean {
-    return !this._connection;
-  }
-
-  /**
-   * Marks the session as closed, called by the connection.
-   */
-  _onClose() {
-    for (const callback of this._callbacks.values()) {
-      callback.reject(callback.from.setCause(0, 'Connection is closed'));
-    }
-
-    this._callbacks.clear();
-    this._connection = undefined;
-  }
+		this.callbacks.delete(object.id);
+		if ('error' in object) {
+			callback.reject(
+				new ProtocolError({
+					code: object.error.code,
+					message: object.error.message,
+					method: callback.method,
+				}),
+			);
+		} else if ('result' in object) {
+			callback.resolve(object.result);
+		} else {
+			callback.reject(
+				new Error(
+					`Expected to have error or result in response: ${JSON.stringify(object)}`,
+				),
+			);
+		}
+	}
 }

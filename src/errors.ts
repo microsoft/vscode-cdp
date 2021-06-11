@@ -2,21 +2,12 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-/**
- * Updates the "cause" of the protocol error. This is used when dealing with
- * deferred errors in order to capture the stack at the call-site and fill
- * the error in with details after the response is received.
- * @hidden
- */
-export function setProtocolErrorCause(error: ProtocolError, code: number, message: string) {
-	error.cause = { code, message };
-	error.message = `CDP error ${code} calling method ${error.method}: ${message}`;
-	error.stack = error.stack?.replace('<<message>>', error.message);
-	return error;
-}
+import { CdpProtocol } from './cdp-protocol';
+import { Transportable } from './transport';
 
-// @see https://source.chromium.org/chromium/chromium/src/+/master:v8/third_party/inspector_protocol/crdtp/dispatch.h;drc=3573d5e0faf3098600993625b3f07b83f8753867
 export const enum ProtocolErrorCode {
+	// CDP Errors:
+	// @see https://source.chromium.org/chromium/chromium/src/+/master:v8/third_party/inspector_protocol/crdtp/dispatch.h;drc=3573d5e0faf3098600993625b3f07b83f8753867
 	ParseError = -32700,
 	InvalidRequest = -32600,
 	MethodNotFound = -32601,
@@ -26,13 +17,47 @@ export const enum ProtocolErrorCode {
 }
 
 /**
- * Base error extended by other error types.
+ * Base error extended by all other errors the library emits.
+ */
+export class CdpError extends Error {}
+
+export interface IProtocolErrorCause {
+	code: number;
+	method: string;
+	message: string;
+}
+
+/**
+ * Class thrown on an error returned from the remote CDP server.
  */
 export class ProtocolError extends Error {
-	public cause!: { code: number; message: string };
+	/**
+	 * Creates a correctly-typed error from the protocol cause.
+	 */
+	public static from(cause: IProtocolErrorCause, originalStack: string): ProtocolError {
+		switch (cause.code) {
+			case ProtocolErrorCode.ParseError:
+				return new ProtocolParseError(cause, originalStack);
+			case ProtocolErrorCode.InvalidRequest:
+				return new InvalidRequestError(cause, originalStack);
+			case ProtocolErrorCode.MethodNotFound:
+				return new MethodNotFoundError(cause, originalStack);
+			case ProtocolErrorCode.InvalidParams:
+				return new InvalidParametersError(cause, originalStack);
+			case ProtocolErrorCode.InternalError:
+				return new InternalError(cause, originalStack);
+			case ProtocolErrorCode.ServerError:
+				return new ServerError(cause, originalStack);
+			default:
+				return new ProtocolError(cause, originalStack);
+		}
+	}
 
-	constructor(public readonly method: string) {
-		super('<<message>>');
+	constructor(public readonly cause: IProtocolErrorCause, originalStack?: string) {
+		super(`CDP error ${cause.code} calling method ${cause.method}: ${cause.message}`);
+		if (originalStack) {
+			this.stack = originalStack;
+		}
 	}
 }
 
@@ -47,3 +72,53 @@ export class InvalidParametersError extends ProtocolError {}
 export class InternalError extends ProtocolError {}
 
 export class ServerError extends ProtocolError {}
+
+/**
+ * Error thrown from CDP commands if the connection is closed before the
+ * command returns.
+ */
+export class ConnectionClosedError extends CdpError {
+	constructor(public readonly cause?: Error, originalStack?: string) {
+		super(cause ? cause.message : 'Connection closed');
+		if (originalStack) {
+			this.stack = originalStack;
+		}
+	}
+}
+
+/**
+ * Error emitted on the {@link Connection.onDidReceiveError} when
+ * deserialization of input fails.
+ */
+export class DeserializationError extends CdpError {
+	constructor(public readonly cause: Error, public readonly protocolMessage: Transportable) {
+		super(`Deserialization of a message failed: ${cause.message}`);
+	}
+}
+
+/**
+ * Error emitted on the {@link Connection.onDidReceiveError} when a message
+ * is received for an unknown session.
+ */
+export class UnknownSessionError extends CdpError {
+	constructor(public readonly protocolMessage: CdpProtocol.Message) {
+		super(`Message received for unknown session ID`);
+	}
+}
+
+/**
+ * Error emitted on the {@link Connection.onDidReceiveError} when a the process
+ * of emitted a received message results in an error. Usually this will be
+ * from user code.
+ */
+export class MessageProcessingError extends CdpError {
+	constructor(
+		public readonly cause: Error,
+		public readonly protocolMessage: CdpProtocol.Message,
+	) {
+		super(`Error processing a CDP message: ${cause.message}`);
+		if (cause.stack) {
+			this.stack = cause.stack;
+		}
+	}
+}

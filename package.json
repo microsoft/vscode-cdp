@@ -14,6 +14,9 @@
     "test:lint": "eslint \"src/**/*.ts\"",
     "fmt": "prettier --write \"src/**/*.ts\" && npm run -s test:lint -- --fix"
   },
+  "engines": {
+    "node": ">=12"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/microsoft/vscode-cdp.git"
