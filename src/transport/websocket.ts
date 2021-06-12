@@ -7,6 +7,9 @@ import * as WebSocket from 'ws';
 import { ICancellationToken, timeoutPromise } from '../cancellation';
 import { ITransport, Transportable } from '.';
 
+/**
+ * Transport that works over a DOM or Node.js WebSocket.
+ */
 export class WebSocketTransport implements ITransport {
 	private _ws: WebSocket | undefined;
 	private readonly messageEmitter = new EventEmitter<Transportable>();

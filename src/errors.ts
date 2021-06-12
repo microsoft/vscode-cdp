@@ -30,11 +30,14 @@ export interface IProtocolErrorCause {
 /**
  * Class thrown on an error returned from the remote CDP server.
  */
-export class ProtocolError extends Error {
+export class ProtocolError extends CdpError {
 	/**
 	 * Creates a correctly-typed error from the protocol cause.
 	 */
-	public static from(cause: IProtocolErrorCause, originalStack: string): ProtocolError {
+	public static from(
+		cause: IProtocolErrorCause,
+		originalStack: string | undefined,
+	): ProtocolError {
 		switch (cause.code) {
 			case ProtocolErrorCode.ParseError:
 				return new ProtocolParseError(cause, originalStack);
@@ -58,6 +61,10 @@ export class ProtocolError extends Error {
 		if (originalStack) {
 			this.stack = originalStack;
 		}
+	}
+
+	public serialize(id: number): CdpProtocol.IError {
+		return { id, error: { code: this.cause.code, message: this.cause.message } };
 	}
 }
 

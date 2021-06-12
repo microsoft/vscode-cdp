@@ -6,7 +6,7 @@
   "scripts": {
     "update": "npm run -S build && node dist/build/download-types",
     "build": "rimraf dist && tsc",
-    "watch": "tsc --watch",
+    "watch": "rimraf dist && tsc --watch",
     "test": "concurrently test:fmt test:unit test:lint",
     "test:fmt": "prettier --list-different \"src/**/*.ts\"",
     "test:unit": "jest src",
@@ -37,14 +37,10 @@
   },
   "homepage": "https://github.com/microsoft/vscode-cdp#readme",
   "devDependencies": {
-    "@babel/core": "^7.14.3",
-    "@babel/preset-env": "^7.14.4",
-    "@babel/preset-typescript": "^7.13.0",
     "@types/jest": "^26.0.23",
     "@types/node": "^15.12.2",
     "@typescript-eslint/eslint-plugin": "^4.26.1",
     "@typescript-eslint/parser": "^4.26.1",
-    "babel-jest": "^27.0.2",
     "concurrently": "^6.2.0",
     "devtools-protocol": "^0.0.888392",
     "eslint": "^7.28.0",
@@ -54,6 +50,7 @@
     "jest": "^27.0.4",
     "prettier": "^2.3.1",
     "rimraf": "^3.0.2",
+    "ts-jest": "^27.0.3",
     "typescript": "^4.3.2"
   },
   "dependencies": {

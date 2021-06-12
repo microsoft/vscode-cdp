@@ -1,12 +1,12 @@
 {
-  "configurations": [
-    {
-      "type": "node",
-      "name": "Tests",
-      "request": "launch",
-      "console": "integratedTerminal",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["test", "--", "--runInBand", "--watchAll=false"]
-    }
-  ]
+	"configurations": [
+		{
+			"type": "node",
+			"name": "Tests",
+			"request": "launch",
+			"console": "integratedTerminal",
+			"runtimeExecutable": "npm",
+			"runtimeArgs": ["run", "test:unit", "--", "--runInBand", "--watchAll=false"]
+		}
+	]
 }

@@ -15,7 +15,7 @@ import { ISerializer } from './serializer';
 import { ITransport, Transportable } from './transport';
 
 interface IProtocolCallback {
-	resolve: (o: Record<string, unknown>) => void;
+	resolve: (o: unknown) => void;
 	reject: (e: Error) => void;
 	stack?: string;
 	method: string;
@@ -27,8 +27,8 @@ let shouldCaptureStackTrace = false;
  * Turns on capturing of stack traces when CDP requests are issued.
  * This is useful for debugging, but has a performance overhead.
  */
-export function captureCdpStackTraces() {
-	shouldCaptureStackTrace = true;
+export function captureCdpStackTraces(capture = true) {
+	shouldCaptureStackTrace = capture;
 }
 
 export class Connection {
@@ -75,26 +75,73 @@ export class Connection {
 	public readonly rootSession = new CDPSession(this, undefined);
 
 	constructor(private readonly transport: ITransport, private readonly serializer: ISerializer) {
-		transport.onMessage(message => this._onMessage(message));
+		transport.onMessage(message => this.onMessage(message));
 		transport.onEnd(err => this.onTransportClose(err));
 	}
 
 	/**
-	 * Primitive send message. You should usually use the `send` method on
+	 * Primitive request message. You should usually use the `request` method on
 	 * the {@link CDPSession} instance instead.
 	 */
-	public send(
+	public request(
 		method: string,
 		params: Record<string, unknown> | undefined = {},
 		sessionId: string | undefined,
 	): number {
 		const id = ++this.lastId;
-		const message: CdpProtocol.ICommand = { id, method, params, sessionId };
-		this.transport.send(this.serializer.serialize(message));
+		this.send({ id, method, params, sessionId });
 		return id;
 	}
 
-	private _onMessage(message: Transportable) {
+	/**
+	 * Primitive request call. You should usually use the `request` method on
+	 * the {@link CDPSession} instance instead.
+	 */
+	public send(message: CdpProtocol.Message) {
+		this.transport.send(this.serializer.serialize(message));
+	}
+
+	/**
+	 * Closes the connection and transport.
+	 */
+	public dispose() {
+		this.onTransportClose(undefined);
+	}
+
+	/**
+	 * Gets or creates a Session with the given ID. If no ID is passed, the
+	 * root session is returned.
+	 */
+	public getSession(sessionId: string | undefined) {
+		if (sessionId === undefined) {
+			return this.rootSession;
+		}
+
+		const existing = this.sessions.get(sessionId);
+		if (existing) {
+			return existing;
+		}
+
+		const session = new CDPSession(this, sessionId);
+		this.sessions.set(sessionId, session);
+		session.onDidClose(() => this.sessions.delete(sessionId));
+		return session;
+	}
+
+	private onTransportClose(error: Error | undefined) {
+		if (this.closed) {
+			return;
+		}
+
+		this._closed = true;
+		this.transport.dispose();
+		this.closeEmitter.emit(error);
+		for (const session of this.sessions.values()) {
+			session.dispose();
+		}
+	}
+
+	private onMessage(message: Transportable) {
 		let object: CdpProtocol.Message;
 		try {
 			object = this.serializer.deserialize(message);
@@ -112,46 +159,11 @@ export class Connection {
 		}
 
 		try {
-			session._onMessage(object);
+			session.injectMessage(object);
 		} catch (e) {
 			this.receiveErrorEmitter.emit(new MessageProcessingError(e, object));
 			return;
 		}
-	}
-
-	/**
-	 * Closes the connection and transport.
-	 */
-	public dispose() {
-		this.onTransportClose();
-	}
-
-	/**
-	 * Creates a new Session with the given ID.
-	 */
-	public createSession(sessionId: string) {
-		const existing = this.sessions.get(sessionId);
-		if (existing) {
-			return existing;
-		}
-
-		const session = new CDPSession(this, sessionId);
-		this.sessions.set(sessionId, session);
-		session.onDidClose(() => this.sessions.delete(sessionId));
-		return session;
-	}
-
-	private onTransportClose(error?: Error) {
-		if (this.closed) {
-			return;
-		}
-
-		this._closed = true;
-		this.transport.dispose();
-		for (const session of this.sessions.values()) {
-			session.dispose();
-		}
-		this.closeEmitter.emit(error);
 	}
 }
 
@@ -164,11 +176,11 @@ export class CDPSession implements IDisposable {
 	private readonly callbacks = new Map<number, IProtocolCallback>();
 	private readonly eventEmitter = new EventEmitter<CdpProtocol.ICommand>();
 	private readonly closeEmitter = new EventEmitter<Error | undefined>();
+	private readonly disposables: IDisposable[] = [];
 	private connection:
 		| { state: ConnectionState.Open; object: Connection }
 		| { state: ConnectionState.Closed; cause: Error | undefined };
 	private pauseQueue?: CdpProtocol.Message[];
-	private readonly disposables: IDisposable[] = [];
 
 	/**
 	 * Emitter that fires whenever an event is received. Method replies
@@ -220,18 +232,14 @@ export class CDPSession implements IDisposable {
 	/**
 	 * Sends a request to CDP, returning its untyped result.
 	 */
-	public send(method: string, params: Record<string, unknown> = {}) {
+	public request(method: string, params: Record<string, unknown> = {}) {
 		if (this.connection.state === ConnectionState.Closed) {
 			return Promise.reject(new ConnectionClosedError(this.connection.cause));
 		}
 
-		const id = this.connection.object.send(method, params, this.sessionId);
-		return new Promise<Record<string, unknown>>((resolve, reject) => {
-			const obj: IProtocolCallback = {
-				resolve,
-				reject,
-				method,
-			};
+		const id = this.connection.object.request(method, params, this.sessionId);
+		return new Promise<unknown>((resolve, reject) => {
+			const obj: IProtocolCallback = { resolve, reject, method };
 
 			if (shouldCaptureStackTrace) {
 				Error.captureStackTrace(obj);
@@ -242,9 +250,20 @@ export class CDPSession implements IDisposable {
 	}
 
 	/**
+	 * Sends a raw message on the session. For method calls, you should usually
+	 * use `request` instead.
+	 */
+	public send(message: CdpProtocol.Message) {
+		message.sessionId = this.sessionId;
+		if (this.connection.state === ConnectionState.Open) {
+			this.connection.object.send(message);
+		}
+	}
+
+	/**
 	 * Handles an incoming message. Called by the connection.
 	 */
-	public _onMessage(object: CdpProtocol.Message) {
+	public injectMessage(object: CdpProtocol.Message) {
 		if (!this.pauseQueue || CdpProtocol.isResponse(object)) {
 			this.processResponse(object);
 		} else {
@@ -294,11 +313,14 @@ export class CDPSession implements IDisposable {
 		this.callbacks.delete(object.id);
 		if ('error' in object) {
 			callback.reject(
-				new ProtocolError({
-					code: object.error.code,
-					message: object.error.message,
-					method: callback.method,
-				}),
+				ProtocolError.from(
+					{
+						code: object.error.code,
+						message: object.error.message,
+						method: callback.method,
+					},
+					callback.stack,
+				),
 			);
 		} else if ('result' in object) {
 			callback.resolve(object.result);

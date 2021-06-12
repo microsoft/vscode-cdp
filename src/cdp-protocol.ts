@@ -7,7 +7,7 @@ export namespace CdpProtocol {
 	export interface ICommand {
 		id?: number;
 		method: string;
-		params: Record<string, unknown>;
+		params: unknown;
 		sessionId?: string;
 	}
 
@@ -19,7 +19,7 @@ export namespace CdpProtocol {
 
 	export interface ISuccess {
 		id: number;
-		result: Record<string, unknown>;
+		result: unknown;
 		sessionId?: string;
 	}
 
