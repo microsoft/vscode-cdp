@@ -2,107 +2,118 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import { EventEmitter, IDisposable } from 'cockatiel';
-import { CdpServerEventClient, CdpServerMethodHandlers, DomainMap } from './api';
+import { EventEmitter } from 'cockatiel';
+import { CdpServerEventDispatcher, CdpServerMethodHandlers } from './api';
 import { CdpProtocol } from './cdp-protocol';
-import { Connection } from './connection';
-import { DeserializationError, ProtocolError, ProtocolErrorCode } from './errors';
+import { CdpSession } from './cdp-session';
+import { ConnectionState } from './connection';
+import { MethodNotFoundError, ProtocolError, ProtocolErrorCode } from './errors';
+
+const makeEventDispatcher = <TDomains>(send: (event: CdpProtocol.ICommand) => void) => {
+	const eventProxies = new Map(); // cache proxy creations
+	const eventGetMethod = (t: { domain: string }, event: string) => (params: unknown) =>
+		send({ method: `${t.domain}.${event}`, params });
+	return new Proxy(
+		{},
+		{
+			get(_, domain: string) {
+				let targetEvents = eventProxies.get(domain);
+				if (!targetEvents) {
+					targetEvents = new Proxy({ domain }, { get: eventGetMethod });
+					eventProxies.set(domain, targetEvents);
+				}
+
+				return targetEvents;
+			},
+		},
+	) as CdpServerEventDispatcher<TDomains>;
+};
 
 /**
- * Allows implementing a server that handles method calls and can emit
- * events for the CDP domain.
+ * A CDP session that allows a handler to be installed for coming method
+ * calls from a client, and sending events.
  */
-export class CdpServer<TDomains extends DomainMap> implements IDisposable {
-	private handlerErrorEmitter = new EventEmitter<Error>();
+export class ServerCdpSession<TDomains> extends CdpSession {
+	private readonly handlerErrorEmitter = new EventEmitter<Error>();
+
+	/**
+	 * Helper to emit typed events.
+	 */
+	public readonly eventDispatcher = makeEventDispatcher<TDomains>(evt => this.send(evt));
 
 	/**
 	 * Emitter that fires if there's an uncaught error in a handler method.
 	 */
 	public readonly onDidThrowHandlerError = this.handlerErrorEmitter.addListener;
 
-	constructor(private readonly connection: Connection) {
-		connection.onDidReceiveError(err => {
-			if (err instanceof DeserializationError) {
-				connection.send({
-					id: 0,
-					error: { code: ProtocolErrorCode.ParseError, message: err.message },
-				});
-			}
-		});
+	/**
+	 * API implementation for the server. It should be set when the server is
+	 * first acquired.
+	 */
+	public api?: CdpServerMethodHandlers<TDomains>;
+
+	/**
+	 * @override
+	 */
+	public override injectMessage(cmd: CdpProtocol.Message): void {
+		if (!('method' in cmd)) {
+			return;
+		}
+
+		const [domain, fn] = cmd.method.split('.');
+		const id = cmd.id || 0;
+		if (!this.api || !this.api.hasOwnProperty(domain)) {
+			this.handleUnknown(id, cmd);
+			return;
+		}
+
+		const domainFns = this.api[domain as keyof CdpServerMethodHandlers<TDomains>];
+		if (typeof domainFns !== 'object' || !domainFns.hasOwnProperty(fn)) {
+			this.handleUnknown(id, cmd);
+			return;
+		}
+
+		this.handleCall(id, () => domainFns[fn](this.eventDispatcher, cmd.params));
 	}
 
 	/**
-	 * Dispose of the sessions and connection.
+	 * Sends a raw message on the session.
 	 */
-	public dispose() {
-		this.connection.dispose();
+	public send(message: CdpProtocol.Message) {
+		message.sessionId = this.sessionId;
+		if (this.connection.state === ConnectionState.Open) {
+			this.connection.object.send(message);
+		}
 	}
 
-	/**
-	 * Attaches a handler API for the given session on the connection.
-	 */
-	public apiForSession(api: CdpServerMethodHandlers<TDomains>, sessionId?: string): IDisposable {
-		const session = this.connection.getSession(sessionId);
-
-		const unknownMethod = (cmd: CdpProtocol.ICommand) =>
-			session.send({
-				id: cmd.id || 0,
-				error: {
-					code: ProtocolErrorCode.MethodNotFound,
-					message: `Method ${cmd.method} not found`,
-				},
-			});
-
-		const eventProxies = new Map(); // cache proxy creations
-		const eventGetMethod = (t: { domain: string }, event: string) => (params: unknown) =>
-			session.send({ method: `${t.domain}.${event}`, params });
-		const eventClient = new Proxy(
-			{},
-			{
-				get(_, domain: string) {
-					let targetEvents = eventProxies.get(domain);
-					if (!targetEvents) {
-						targetEvents = new Proxy({ domain }, { get: eventGetMethod });
-						eventProxies.set(domain, targetEvents);
-					}
-
-					return targetEvents;
-				},
-			},
-		) as CdpServerEventClient<TDomains>;
-
-		const listener = session.onDidReceiveEvent(cmd => {
-			const [domain, fn] = cmd.method.split('.');
-			if (!api.hasOwnProperty(domain)) {
-				return unknownMethod(cmd);
+	private handleUnknown(id: number, cmd: CdpProtocol.ICommand) {
+		this.handleCall(id, async () => {
+			const result = await this.api?.unknown?.(this.eventDispatcher, cmd.method, cmd.params);
+			if (!result) {
+				throw MethodNotFoundError.create(cmd.method);
 			}
 
-			const domainFns = api[domain];
-			if (!domainFns.hasOwnProperty(fn)) {
-				return unknownMethod(cmd);
-			}
-
-			const id = cmd.id || 0;
-			domainFns[fn](eventClient, cmd.params)
-				.then(result => session.send({ id, result }))
-				.catch(e => {
-					if (e instanceof ProtocolError) {
-						session.send(e.serialize(id));
-					} else {
-						this.handlerErrorEmitter.emit(e);
-						session.send({
-							id,
-							error: { code: ProtocolErrorCode.InternalError, message: e.message },
-						});
-					}
-				});
+			return result;
 		});
+	}
 
-		return {
-			dispose() {
-				listener.dispose();
-				session.dispose();
-			},
-		};
+	private async handleCall(id: number, call: () => Promise<unknown>) {
+		try {
+			this.send({ id, result: await call() });
+		} catch (e) {
+			if (e instanceof ProtocolError) {
+				this.send(e.serialize(id));
+			} else {
+				this.handlerErrorEmitter.emit(e);
+				this.send({
+					id,
+					error: { code: ProtocolErrorCode.InternalError, message: e.message },
+				});
+			}
+		}
+	}
+
+	protected disposeInner(): void {
+		this.api = undefined;
 	}
 }

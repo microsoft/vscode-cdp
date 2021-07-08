@@ -1,69 +1,71 @@
 {
-  "name": "@vscode/cdp",
-  "version": "0.1.0",
-  "description": "Node.js libraries for interfacing with the Chrome DevTools Protocol",
-  "main": "dist/index.js",
-  "scripts": {
-    "update": "npm run -S build && node dist/build/download-types",
-    "build": "rimraf dist && tsc",
-    "watch": "rimraf dist && tsc --watch",
-    "test": "concurrently test:fmt test:unit test:lint",
-    "test:fmt": "prettier --list-different \"src/**/*.ts\"",
-    "test:unit": "jest src",
-    "test:watch": "jest src --watch",
-    "test:lint": "eslint \"src/**/*.ts\"",
-    "fmt": "prettier --write \"src/**/*.ts\" && npm run -s test:lint -- --fix"
-  },
-  "engines": {
-    "node": ">=12"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/microsoft/vscode-cdp.git"
-  },
-  "keywords": [
-    "vscode",
-    "cdp",
-    "chrome",
-    "devtools",
-    "protocol",
-    "chrome",
-    "protocol"
-  ],
-  "author": "Connor Peet <connor@peet.io>",
-  "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/microsoft/vscode-cdp/issues"
-  },
-  "homepage": "https://github.com/microsoft/vscode-cdp#readme",
-  "devDependencies": {
-    "@types/jest": "^26.0.23",
-    "@types/node": "^15.12.2",
-    "@typescript-eslint/eslint-plugin": "^4.26.1",
-    "@typescript-eslint/parser": "^4.26.1",
-    "concurrently": "^6.2.0",
-    "devtools-protocol": "^0.0.888392",
-    "eslint": "^7.28.0",
-    "eslint-plugin-header": "^3.1.1",
-    "execa": "^5.1.1",
-    "got": "^11.8.2",
-    "jest": "^27.0.4",
-    "prettier": "^2.3.1",
-    "rimraf": "^3.0.2",
-    "ts-jest": "^27.0.3",
-    "typescript": "^4.3.2"
-  },
-  "dependencies": {
-    "@types/ws": "^7.4.4",
-    "cockatiel": "^2.0.2",
-    "ws": "^7.4.6"
-  },
-  "prettier": {
-    "trailingComma": "all",
-    "singleQuote": true,
-    "arrowParens": "avoid",
-    "printWidth": 100,
-    "useTabs": true,
-    "tabWidth": 4
-  }
+	"name": "@vscode/cdp",
+	"version": "0.1.0",
+	"description": "Node.js libraries for interfacing with the Chrome DevTools Protocol",
+	"main": "dist/index.js",
+	"scripts": {
+		"update": "ts-node src/build/download-types",
+		"build": "rimraf dist && tsc",
+		"watch": "rimraf dist && tsc --watch",
+		"test": "concurrently npm:test:fmt npm:test:unit npm:test:lint",
+		"test:fmt": "prettier --list-different \"src/**/*.ts\"",
+		"test:unit": "jest src",
+		"test:watch": "jest src --watch",
+		"test:lint": "eslint \"src/**/*.ts\"",
+		"postinstall": "yarn update",
+		"fmt": "prettier --write \"src/**/*.ts\" && yarn test:lint --fix"
+	},
+	"engines": {
+		"node": ">=12"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/microsoft/vscode-cdp.git"
+	},
+	"keywords": [
+		"vscode",
+		"cdp",
+		"chrome",
+		"devtools",
+		"protocol",
+		"chrome",
+		"protocol"
+	],
+	"author": "Connor Peet <connor@peet.io>",
+	"license": "MIT",
+	"bugs": {
+		"url": "https://github.com/microsoft/vscode-cdp/issues"
+	},
+	"homepage": "https://github.com/microsoft/vscode-cdp#readme",
+	"devDependencies": {
+		"@types/jest": "^26.0.23",
+		"@types/node": "^15.12.2",
+		"@typescript-eslint/eslint-plugin": "^4.26.1",
+		"@typescript-eslint/parser": "^4.26.1",
+		"concurrently": "^6.2.0",
+		"devtools-protocol": "^0.0.888392",
+		"eslint": "^7.28.0",
+		"eslint-plugin-header": "^3.1.1",
+		"execa": "^5.1.1",
+		"got": "^11.8.2",
+		"jest": "^27.0.4",
+		"prettier": "^2.3.1",
+		"rimraf": "^3.0.2",
+		"ts-jest": "^27.0.3",
+		"ts-node": "^10.0.0",
+		"typescript": "^4.3.2"
+	},
+	"dependencies": {
+		"@types/ws": "^7.4.4",
+		"cockatiel": "^2.0.2",
+		"ws": "^7.4.6"
+	},
+	"prettier": {
+		"trailingComma": "all",
+		"singleQuote": true,
+		"arrowParens": "avoid",
+		"printWidth": 100,
+		"useTabs": true,
+		"tabWidth": 4
+	}
 }

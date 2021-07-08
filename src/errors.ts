@@ -72,7 +72,15 @@ export class ProtocolParseError extends ProtocolError {}
 
 export class InvalidRequestError extends ProtocolError {}
 
-export class MethodNotFoundError extends ProtocolError {}
+export class MethodNotFoundError extends ProtocolError {
+	public static create(method: string) {
+		return new MethodNotFoundError({
+			code: ProtocolErrorCode.MethodNotFound,
+			method,
+			message: `Method ${method} not found`,
+		});
+	}
+}
 
 export class InvalidParametersError extends ProtocolError {}
 

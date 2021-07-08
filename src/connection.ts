@@ -2,37 +2,26 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import { EventEmitter, IDisposable } from 'cockatiel';
+import { EventEmitter } from 'cockatiel';
 import { CdpProtocol } from './cdp-protocol';
-import {
-	ConnectionClosedError,
-	DeserializationError,
-	MessageProcessingError,
-	ProtocolError,
-	UnknownSessionError,
-} from './errors';
+import { CdpSession } from './cdp-session';
+import { ClientCdpSession } from './client';
+import { CdpBrowser, CdpV8 } from './definitions';
+import { DeserializationError, MessageProcessingError, UnknownSessionError } from './errors';
 import { ISerializer } from './serializer';
+import { JsonSerializer } from './serializer/json';
+import { ServerCdpSession } from './server';
 import { ITransport, Transportable } from './transport';
 
-interface IProtocolCallback {
-	resolve: (o: unknown) => void;
-	reject: (e: Error) => void;
-	stack?: string;
-	method: string;
-}
+type SessionCtor<T extends CdpSession> = {
+	new (connection: Connection<CdpSession>, sessionId: string | undefined): T;
+};
 
-let shouldCaptureStackTrace = false;
+export type ClientConnection<TDomains> = Connection<ClientCdpSession<TDomains>>;
+export type ServerConnection<TDomains> = Connection<ServerCdpSession<TDomains>>;
 
-/**
- * Turns on capturing of stack traces when CDP requests are issued.
- * This is useful for debugging, but has a performance overhead.
- */
-export function captureCdpStackTraces(capture = true) {
-	shouldCaptureStackTrace = capture;
-}
-
-export class Connection {
-	private readonly sessions = new Map<string, CDPSession>();
+export class Connection<T extends CdpSession> {
+	private readonly sessions = new Map<string, T>();
 	private lastId = 1000;
 	private _closed = false;
 	private readonly closeEmitter = new EventEmitter<Error | undefined>();
@@ -72,16 +61,40 @@ export class Connection {
 	/**
 	 * Root CDP session.
 	 */
-	public readonly rootSession = new CDPSession(this, undefined);
+	public readonly rootSession: T = new this.sessionCtor(this, undefined);
 
-	constructor(private readonly transport: ITransport, private readonly serializer: ISerializer) {
+	/**
+	 * Creates a CDP connection for consuming as a client.
+	 */
+	public static client<TDomains = CdpV8.Domains & CdpBrowser.Domains>(
+		transport: ITransport,
+		serializer: ISerializer = new JsonSerializer(),
+	): ClientConnection<TDomains> {
+		return new Connection<ClientCdpSession<TDomains>>(transport, serializer, ClientCdpSession);
+	}
+
+	/**
+	 * Creates a CDP connection for consuming as a server.
+	 */
+	public static server<TDomains>(
+		transport: ITransport,
+		serializer: ISerializer = new JsonSerializer(),
+	): ServerConnection<TDomains> {
+		return new Connection<ServerCdpSession<TDomains>>(transport, serializer, ServerCdpSession);
+	}
+
+	constructor(
+		private readonly transport: ITransport,
+		private readonly serializer: ISerializer,
+		private readonly sessionCtor: SessionCtor<T>,
+	) {
 		transport.onMessage(message => this.onMessage(message));
 		transport.onEnd(err => this.onTransportClose(err));
 	}
 
 	/**
 	 * Primitive request message. You should usually use the `request` method on
-	 * the {@link CDPSession} instance instead.
+	 * the {@link ClientCDPSession} instance instead.
 	 */
 	public request(
 		method: string,
@@ -95,7 +108,7 @@ export class Connection {
 
 	/**
 	 * Primitive request call. You should usually use the `request` method on
-	 * the {@link CDPSession} instance instead.
+	 * the {@link ClientCDPSession} instance instead.
 	 */
 	public send(message: CdpProtocol.Message) {
 		this.transport.send(this.serializer.serialize(message));
@@ -122,7 +135,7 @@ export class Connection {
 			return existing;
 		}
 
-		const session = new CDPSession(this, sessionId);
+		const session: T = new this.sessionCtor(this, sessionId);
 		this.sessions.set(sessionId, session);
 		session.onDidClose(() => this.sessions.delete(sessionId));
 		return session;
@@ -136,9 +149,7 @@ export class Connection {
 		this._closed = true;
 		this.transport.dispose();
 		this.closeEmitter.emit(error);
-		for (const session of this.sessions.values()) {
-			session.dispose();
-		}
+		this.rootSession.dispose();
 	}
 
 	private onMessage(message: Transportable) {
@@ -167,169 +178,7 @@ export class Connection {
 	}
 }
 
-const enum ConnectionState {
+export const enum ConnectionState {
 	Open,
 	Closed,
-}
-
-export class CDPSession implements IDisposable {
-	private readonly callbacks = new Map<number, IProtocolCallback>();
-	private readonly eventEmitter = new EventEmitter<CdpProtocol.ICommand>();
-	private readonly closeEmitter = new EventEmitter<Error | undefined>();
-	private readonly disposables: IDisposable[] = [];
-	private connection:
-		| { state: ConnectionState.Open; object: Connection }
-		| { state: ConnectionState.Closed; cause: Error | undefined };
-	private pauseQueue?: CdpProtocol.Message[];
-
-	/**
-	 * Emitter that fires whenever an event is received. Method replies
-	 * are not emitted here.
-	 */
-	public readonly onDidReceiveEvent = this.eventEmitter.addListener;
-
-	/**
-	 * Event that fires when the transport is disconnected, or when the
-	 * session is manually disposed of. If it was the result of a transport
-	 * error, the error is included.
-	 */
-	public readonly onDidClose = this.closeEmitter.addListener;
-
-	/**
-	 * @returns true if the session or underlying connection is closed
-	 */
-	public get closed() {
-		return this.connection.state === ConnectionState.Closed;
-	}
-
-	constructor(connection: Connection, public readonly sessionId: string | undefined) {
-		this.connection = { state: ConnectionState.Open, object: connection };
-		this.disposables.push(connection.onDidClose(cause => this.disposeInner(cause)));
-	}
-
-	/**
-	 * Pauses the processing of messages for the connection.
-	 */
-	public pause() {
-		this.pauseQueue ??= [];
-	}
-
-	/**
-	 * Resumes the processing of messages for the connection.
-	 */
-	public resume() {
-		if (!this.pauseQueue) {
-			return;
-		}
-
-		const toSend = this.pauseQueue;
-		this.pauseQueue = [];
-		for (const item of toSend) {
-			this.processResponse(item);
-		}
-	}
-
-	/**
-	 * Sends a request to CDP, returning its untyped result.
-	 */
-	public request(method: string, params: Record<string, unknown> = {}) {
-		if (this.connection.state === ConnectionState.Closed) {
-			return Promise.reject(new ConnectionClosedError(this.connection.cause));
-		}
-
-		const id = this.connection.object.request(method, params, this.sessionId);
-		return new Promise<unknown>((resolve, reject) => {
-			const obj: IProtocolCallback = { resolve, reject, method };
-
-			if (shouldCaptureStackTrace) {
-				Error.captureStackTrace(obj);
-			}
-
-			this.callbacks.set(id, obj);
-		});
-	}
-
-	/**
-	 * Sends a raw message on the session. For method calls, you should usually
-	 * use `request` instead.
-	 */
-	public send(message: CdpProtocol.Message) {
-		message.sessionId = this.sessionId;
-		if (this.connection.state === ConnectionState.Open) {
-			this.connection.object.send(message);
-		}
-	}
-
-	/**
-	 * Handles an incoming message. Called by the connection.
-	 */
-	public injectMessage(object: CdpProtocol.Message) {
-		if (!this.pauseQueue || CdpProtocol.isResponse(object)) {
-			this.processResponse(object);
-		} else {
-			this.pauseQueue.push(object);
-		}
-	}
-
-	/**
-	 * @inheritdoc
-	 */
-	public dispose() {
-		this.disposeInner(undefined);
-	}
-
-	private disposeInner(cause: Error | undefined) {
-		if (this.connection.state === ConnectionState.Closed) {
-			return;
-		}
-
-		for (const callback of this.callbacks.values()) {
-			callback.reject(new ConnectionClosedError(cause, callback.stack));
-		}
-
-		for (const disposable of this.disposables) {
-			disposable.dispose();
-		}
-
-		this.callbacks.clear();
-		this.connection = { state: ConnectionState.Closed, cause };
-		this.pauseQueue = undefined;
-		this.closeEmitter.emit(cause);
-	}
-
-	private processResponse(object: CdpProtocol.Message) {
-		if (object.id === undefined) {
-			// for some reason, TS doesn't narrow this even though CdpProtocol.ICommand
-			// is the only type of the tuple where id can be undefined.
-			this.eventEmitter.emit(object as CdpProtocol.ICommand);
-			return;
-		}
-
-		const callback = this.callbacks.get(object.id);
-		if (!callback) {
-			return;
-		}
-
-		this.callbacks.delete(object.id);
-		if ('error' in object) {
-			callback.reject(
-				ProtocolError.from(
-					{
-						code: object.error.code,
-						message: object.error.message,
-						method: callback.method,
-					},
-					callback.stack,
-				),
-			);
-		} else if ('result' in object) {
-			callback.resolve(object.result);
-		} else {
-			callback.reject(
-				new Error(
-					`Expected to have error or result in response: ${JSON.stringify(object)}`,
-				),
-			);
-		}
-	}
 }

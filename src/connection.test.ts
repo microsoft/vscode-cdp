@@ -3,25 +3,19 @@
  *--------------------------------------------------------*/
 
 import { CdpProtocol } from './cdp-protocol';
-import { captureCdpStackTraces, Connection } from './connection';
-import {
-	CdpError,
-	ConnectionClosedError,
-	InvalidParametersError,
-	ProtocolError,
-	ProtocolErrorCode,
-} from './errors';
+import { ClientConnection, Connection } from './connection';
+import { ConnectionClosedError, DeserializationError, MessageProcessingError } from './errors';
 import { JsonSerializer } from './serializer/json';
 import { LoopbackTransport } from './transport/loopback';
 
 describe('Connection', () => {
 	const serializer = new JsonSerializer();
 	let transport: LoopbackTransport;
-	let conn: Connection;
+	let conn: ClientConnection<{}>;
 
 	beforeEach(() => {
 		transport = new LoopbackTransport();
-		conn = new Connection(transport, serializer);
+		conn = Connection.client(transport, serializer);
 	});
 
 	afterEach(() => {
@@ -80,80 +74,49 @@ describe('Connection', () => {
 		expect(e2).toHaveBeenCalledWith(m2);
 	});
 
-	it('round trips successfully', async () => {
+	it('rejects calls when connection is closed', async () => {
 		const s1 = conn.getSession('s1');
 
-		transport.onDidSend(msg => {
+		transport.onDidSend(() => {
 			setImmediate(() => {
-				const r = serializer.deserialize(msg);
-				expect((r as CdpProtocol.ICommand).params).toEqual({ hello: 'world' });
-				transport.receive(
-					serializer.serialize({
-						id: r.id! - 1,
-						result: { x: 'wrong id' },
-						sessionId: 's1',
-					}),
-				);
-				transport.receive(
-					serializer.serialize({
-						id: r.id!,
-						result: { x: 'wrong session' },
-						sessionId: 's2',
-					}),
-				);
-				transport.receive(
-					serializer.serialize({ id: r.id!, result: { x: 'hi' }, sessionId: 's1' }),
-				);
+				transport.endWith();
 			});
 		});
 
-		expect(await s1.request('World.greet', { hello: 'world' })).toEqual({ x: 'hi' });
+		await expect(s1.request('World.greet', { hello: 'world' })).rejects.toBeInstanceOf(
+			ConnectionClosedError,
+		);
 	});
 
-	async function captureError(error: CdpProtocol.IError['error']): Promise<ProtocolError> {
-		const l = transport.onDidSend(msg => {
-			setImmediate(() => {
-				const r = serializer.deserialize(msg);
-				transport.receive(serializer.serialize({ id: r.id!, error }));
-				l.dispose();
-			});
+	it('emits a serialization error', async () => {
+		const err = new Promise(r => conn.onDidReceiveError(r));
+		transport.receive('{');
+		expect(await err).toBeInstanceOf(DeserializationError);
+	});
+
+	it('emits a error if it happened during message processing', async () => {
+		const actualErr = new Promise(r => conn.onDidReceiveError(r));
+		const s1 = conn.getSession('s1');
+		s1.onDidReceiveEvent(() => {
+			throw new Error('oh no!');
 		});
 
-		try {
-			// wrap so we can test the stack contains doSend:
-			await (async function doSend() {
-				await conn.rootSession.request('World.greet', { hello: 'world' });
-			})();
-			throw new Error('expected to throw');
-		} catch (e) {
-			expect(e).toBeInstanceOf(CdpError);
-			return e;
-		}
-	}
+		transport.receive(
+			serializer.serialize({ method: 'Debugger.paused', sessionId: 's1', params: {} }),
+		);
 
-	it('captures error stacks', async () => {
-		const err1 = await captureError({ code: 0, message: 'some error' });
-		expect(err1.stack).not.toContain('doSend');
-
-		captureCdpStackTraces(true);
-		const err2 = await captureError({ code: 0, message: 'some error' });
-		expect(err2.stack).toContain('doSend');
-		captureCdpStackTraces(false);
+		expect(await actualErr).toBeInstanceOf(MessageProcessingError);
 	});
 
-	it('emits typed errors', async () => {
-		const err1 = await captureError({ code: 0, message: 'some error' });
-		expect(err1.constructor).toBe(ProtocolError);
-		const err2 = await captureError({
-			code: ProtocolErrorCode.InvalidParams,
-			message: 'some error',
-		});
-		expect(err2.constructor).toBe(InvalidParametersError);
+	it('gets sessions idempotently', () => {
+		const s1 = conn.getSession('s1');
+		expect(s1).toBe(conn.getSession('s1'));
+		expect(conn.getSession(undefined)).toBe(conn.rootSession);
 	});
 
-	it('errors if connection is closed', async () => {
+	it('cleans up sessions after dispose', () => {
+		conn.getSession('s1');
 		conn.dispose();
-		const err1 = await captureError({ code: 0, message: 'some error' });
-		expect(err1).toBeInstanceOf(ConnectionClosedError);
+		expect((conn as any).sessions.size).toEqual(0);
 	});
 });
