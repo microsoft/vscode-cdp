@@ -5,6 +5,7 @@
 	"main": "dist/index.js",
 	"scripts": {
 		"update": "ts-node src/build/download-types",
+		"prepack": "rimraf dist && tsc",
 		"build": "rimraf dist && tsc",
 		"watch": "rimraf dist && tsc --watch",
 		"test": "concurrently npm:test:fmt npm:test:unit npm:test:lint",
