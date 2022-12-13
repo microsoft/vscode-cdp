@@ -1,0 +1,47 @@
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include:
+      - main
+
+resources:
+  repositories:
+    - repository: templates
+      type: github
+      name: microsoft/vscode-engineering
+      ref: main
+      endpoint: Monaco
+
+parameters:
+  - name: publishPackage
+    displayName: 🚀 Publish cdp
+    type: boolean
+    default: false
+
+extends:
+  template: azure-pipelines/npm-package/pipeline.yml@templates
+  parameters:
+    npmPackages:
+      - name: cdp
+
+        buildSteps:
+          - script: yarn --frozen-lockfile
+            displayName: Install dependencies
+
+        testPlatforms:
+          - name: Linux
+            nodeVersions:
+              - 16.x
+
+        testSteps:
+          - script: yarn --frozen-lockfile
+            displayName: Install dependencies
+
+          - script: yarn build
+            displayName: Build
+
+          - script: yarn test
+            displayName: Test
+
+        publishPackage: ${{ parameters.publishPackage }}
