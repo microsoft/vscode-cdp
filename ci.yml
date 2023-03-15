@@ -24,7 +24,7 @@ extends:
   parameters:
     npmPackages:
       - name: cdp
-
+        ghCreateTag: false
         buildSteps:
           - script: yarn --frozen-lockfile
             displayName: Install dependencies
